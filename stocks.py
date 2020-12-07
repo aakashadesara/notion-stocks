@@ -8,10 +8,11 @@ import math
 import yfinance as yf
 from notionpy.notion.client import NotionClient
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # start - CHANGE THESE
-NOTION_V2_TOKEN = "<YOUR_NOTION_TOKEN_V2>" 
-NOTION_PAGE_LINK = "<YOUR_NOTION_PAGE_LINK>"
+NOTION_V2_TOKEN = "<NOTION_V2_TOKEN>" 
+NOTION_PAGE_LINK = "<NOTION_PAGE_LINK>"
 
 STOCK_SYMBOLS_LIST = 1
 REFRESH_BUTTON_POSITION = 3
@@ -64,18 +65,26 @@ def populate_stock_data():
     client = NotionClient(token_v2=NOTION_V2_TOKEN)
     page = client.get_block(NOTION_PAGE_LINK)
     database = page.children[DATABASE_POSITION].collection
-    rows = database.get_rows()
+    symbols = get_stock_symbols()
+
+    PARTITIONS = min(len(symbols), 10)
+    executor = ThreadPoolExecutor(max_workers=PARTITIONS)
+    for symbols_sub in [symbols[int(i*len(symbols)/PARTITIONS): int(i*len(symbols)/PARTITIONS + len(symbols)/PARTITIONS)] for i in range(PARTITIONS)]:
+        executor.submit(process_rows, (symbols_sub))
+
+def process_rows(symbols):
+    client = NotionClient(token_v2=NOTION_V2_TOKEN)
+    page = client.get_block(NOTION_PAGE_LINK)
+    database = page.children[DATABASE_POSITION].collection
 
     updating_indicator = page.children[UPDATING_POSITION]
 
     success = True
     failed_to_load = []
-    for i, row in enumerate(rows):
-        symbol = row.title
+    for i, symbol in enumerate(symbols):
         stock = yf.Ticker(symbol)
 
-        updating_indicator.title = "🟡  _Stocks are currently updating -- progress: %s/%s_" % (str(i+1), str(len(rows)))
-
+        updating_indicator.title = "🟡  _Stocks are currently updating_" 
         try:
             info = stock.info
             hist = stock.history(period="1y")
@@ -95,18 +104,21 @@ def populate_stock_data():
             price_to_sales_ratio = info['priceToSalesTrailing12Months'] if 'priceToSalesTrailing12Months' in info else 0.0
             eps = info['forwardEps'] if 'forwardEps' in info else 0.0
 
-            row.set_property('name', name)
-            row.set_property('price', price)
-            row.set_property('52-week Low', min52Week)
-            row.set_property('52-week High', max52Week)
-            row.set_property('ratio', round(ratio or -1, 2))
-            row.set_property('dividend', dividend_rate and round(dividend_rate * 1000, 2) / 1000)
-            row.set_property('sector', sector or "")
-            row.set_property('description', descr[0:150] + "...")
-            row.set_property('pe', round(pe_ratio or -1, 2))
-            row.set_property('market_cap', '$' + str(round(market_cap / 1000000000 or -1, 1)) + ' B')
-            row.set_property('price_to_sales', round(price_to_sales_ratio or -1, 2))
-            row.set_property('eps', eps)
+            row = database.add_row(
+                symbol=symbol, 
+                name=name,
+                price=price,
+                year_low=min52Week,
+                year_high=max52Week,
+                ratio=round(ratio or -1, 2),
+                dividend=dividend_rate and round(dividend_rate * 1000, 2) / 1000,
+                sector=sector or "",
+                description=descr[0:150] + "...",
+                pe=round(pe_ratio or -1, 2),
+                market_cap='$' + str(round(market_cap / 1000000000 or -1, 1)) + ' B',
+                price_to_sales=round(price_to_sales_ratio or -1, 2),
+                eps=eps
+            )
         except:
             success = False
             failed_to_load.append(symbol)
@@ -115,7 +127,6 @@ def populate_stock_data():
         updating_indicator.title = "✅  Stocks have been updated as of `%s`" % get_datetime()
     else:
         updating_indicator.title = "🚨  Error loading %s" % ', '.join(failed_to_load)
-
 
 def callback():
     client = NotionClient(token_v2=NOTION_V2_TOKEN)
@@ -145,8 +156,8 @@ def main():
     page = client.get_block(NOTION_PAGE_LINK)
     refresh_button = page.children[REFRESH_BUTTON_POSITION]
 
-    symbols = get_stock_symbols()
-    enter_symbols(symbols)
+    # symbols = get_stock_symbols()
+    # enter_symbols(symbols)
     populate_stock_data()
 
 if __name__ == '__main__':
